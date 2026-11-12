@@ -1,5 +1,5 @@
-// Lightweight pure-JS MD5 implementation (Web Crypto does not support MD5)
-function md5(string: string): string {
+// Lightweight pure-JS MD5 implementation for byte arrays or strings
+function md5Bytes(bytes: Uint8Array): string {
   function rotateLeft(lValue: number, iShiftBits: number) {
     return (lValue << iShiftBits) | (lValue >>> (32 - iShiftBits));
   }
@@ -45,13 +45,12 @@ function md5(string: string): string {
     return addUnsigned(rotateLeft(a, s), b);
   }
 
-  const utf8 = new TextEncoder().encode(string);
   const words: number[] = [];
-  for (let i = 0; i < utf8.length; i++) {
-    words[i >> 2] |= utf8[i] << ((i % 4) * 8);
+  for (let i = 0; i < bytes.length; i++) {
+    words[i >> 2] |= bytes[i] << ((i % 4) * 8);
   }
 
-  const bitLen = utf8.length * 8;
+  const bitLen = bytes.length * 8;
   words[bitLen >> 5] |= 0x80 << (bitLen % 32);
   words[(((bitLen + 64) >>> 9) << 4) + 14] = bitLen;
 
@@ -153,9 +152,8 @@ function md5(string: string): string {
   return (wordToHex(a) + wordToHex(b) + wordToHex(c) + wordToHex(d)).toLowerCase();
 }
 
-async function webCryptoHash(algorithm: 'SHA-1' | 'SHA-256', text: string): Promise<string> {
-  const msgUint8 = new TextEncoder().encode(text);
-  const hashBuffer = await crypto.subtle.digest(algorithm, msgUint8);
+async function webCryptoHashBytes(algorithm: 'SHA-1' | 'SHA-256', bytes: Uint8Array): Promise<string> {
+  const hashBuffer = await crypto.subtle.digest(algorithm, bytes as unknown as BufferSource);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
@@ -166,20 +164,28 @@ export interface HashOutputs {
   sha256: string;
 }
 
-export async function computeHashes(input: string, uppercase = false): Promise<HashOutputs> {
-  if (!input) {
+export async function computeHashesFromBytes(bytes: Uint8Array, uppercase = false): Promise<HashOutputs> {
+  if (bytes.length === 0) {
     return { md5: '', sha1: '', sha256: '' };
   }
 
   const [sha1Res, sha256Res] = await Promise.all([
-    webCryptoHash('SHA-1', input),
-    webCryptoHash('SHA-256', input),
+    webCryptoHashBytes('SHA-1', bytes),
+    webCryptoHashBytes('SHA-256', bytes),
   ]);
-  const md5Res = md5(input);
+  const md5Res = md5Bytes(bytes);
 
   return {
     md5: uppercase ? md5Res.toUpperCase() : md5Res.toLowerCase(),
     sha1: uppercase ? sha1Res.toUpperCase() : sha1Res.toLowerCase(),
     sha256: uppercase ? sha256Res.toUpperCase() : sha256Res.toLowerCase(),
   };
+}
+
+export async function computeHashes(input: string, uppercase = false): Promise<HashOutputs> {
+  if (!input) {
+    return { md5: '', sha1: '', sha256: '' };
+  }
+  const bytes = new TextEncoder().encode(input);
+  return computeHashesFromBytes(bytes, uppercase);
 }

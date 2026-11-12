@@ -4,6 +4,8 @@ import { useTheme } from './hooks/useTheme';
 import { useRecentTools } from './hooks/useRecentTools';
 import { toolsRegistry, getToolById } from './tools/registry';
 import { decompressFromHash, compressToHash, getShareUrl } from './lib/urlState';
+import { setHandoffPayload } from './lib/handoff';
+import { encodeImageFile } from './tools/base64/logic';
 import { runDetectionPipeline, type DetectionResult } from './detectors';
 import { CommandPalette } from './components/CommandPalette';
 import {
@@ -17,6 +19,7 @@ import {
   Moon,
   Search,
   History,
+  Copy,
 } from 'lucide-react';
 
 export function App() {
@@ -31,6 +34,7 @@ export function App() {
   const [toastMessage, setToastMessage] = useState<{ message: string; originalInput?: string } | null>(null);
   const [shareToast, setShareToast] = useState(false);
   const [dismissSensitiveBanner, setDismissSensitiveBanner] = useState(false);
+  const [inlineColor, setInlineColor] = useState<string | null>(null);
 
   const activeTool = route.toolId ? getToolById(route.toolId) : undefined;
   const initialData = route.data ? decompressFromHash(route.data) : undefined;
@@ -53,8 +57,35 @@ export function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  // Handle routing an image file (from clipboard paste or drop)
+  const routeImageFile = async (file: File) => {
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    const encoded = encodeImageFile(file, bytes);
+
+    // Save in-memory handoff so URL does not explode
+    setHandoffPayload({
+      toolId: 'base64',
+      type: 'image',
+      name: file.name,
+      mime: encoded.metadata.mime,
+      dataUri: encoded.dataUri,
+      base64: encoded.rawBase64,
+      bytes,
+    });
+
+    startTransition(() => {
+      navigate('/t/base64');
+      setToastMessage({
+        message: 'Detected image — opened Base64 (Image mode)',
+      });
+    });
+  };
+
+  // Smart Paste Text Handler
   const handlePasteOrInputChange = (text: string) => {
     setPastedText(text);
+    setInlineColor(null);
     const trimmed = text.trim();
     if (!trimmed) {
       setCandidates([]);
@@ -70,18 +101,45 @@ export function App() {
     const top = detections[0];
     const second = detections[1];
 
+    // Special case: Hex color (not a tool yet in v1) -> show inline swatch per doc
+    if (top.toolId === 'hex-color') {
+      setInlineColor(top.meta?.colorHex || trimmed);
+      setCandidates([]);
+      return;
+    }
+
+    // High confidence (>0.9) and unambiguous
     const isUnambiguous = !second || (top.confidence >= 0.9 && top.confidence - second.confidence >= 0.15);
 
     if (isUnambiguous) {
-      const compressed = compressToHash(trimmed);
-      startTransition(() => {
-        navigate(`/t/${top.toolId}?d=${compressed}`);
-        setToastMessage({
-          message: `Detected ${top.name} — opened automatically`,
-          originalInput: trimmed,
+      // If text <= 50 KB, encode to URL hash, otherwise keep in-memory handoff
+      const isUnder50Kb = new TextEncoder().encode(trimmed).byteLength <= 50 * 1024;
+      if (isUnder50Kb) {
+        const compressed = compressToHash(trimmed);
+        startTransition(() => {
+          navigate(`/t/${top.toolId}?d=${compressed}`);
+          setToastMessage({
+            message: `Detected ${top.name} — opened automatically`,
+            originalInput: trimmed,
+          });
         });
-      });
+      } else {
+        // In-memory handoff for large text payload
+        setHandoffPayload({
+          toolId: top.toolId,
+          type: 'file',
+          dataUri: trimmed,
+        });
+        startTransition(() => {
+          navigate(`/t/${top.toolId}`);
+          setToastMessage({
+            message: `Detected ${top.name} (large payload loaded in-memory)`,
+            originalInput: trimmed,
+          });
+        });
+      }
     } else {
+      // Ambiguous: show suggestion chips
       setCandidates(detections);
     }
   };
@@ -275,7 +333,7 @@ export function App() {
             <p className={`text-sm md:text-base mt-3 max-w-xl ${
               theme === 'dark' ? 'text-neutral-400' : 'text-neutral-600'
             }`}>
-              Auto-detects JSON, JWT, Base64, Cron, Timestamp, UUID, Hashes, and URLs. Zero server tracking.
+              Auto-detects JSON, JWT, Base64 images/text, Cron, Timestamp, UUID, Hashes, and URLs.
             </p>
 
             <div className="w-full max-w-2xl mt-8 flex flex-col gap-3">
@@ -284,12 +342,31 @@ export function App() {
                 value={pastedText}
                 onChange={(e) => handlePasteOrInputChange(e.target.value)}
                 onPaste={(e) => {
+                  // Check if paste event contains image files
+                  if (e.clipboardData.files && e.clipboardData.files.length > 0) {
+                    const file = e.clipboardData.files[0];
+                    if (file.type.startsWith('image/')) {
+                      e.preventDefault();
+                      routeImageFile(file);
+                      return;
+                    }
+                  }
                   const pasted = e.clipboardData.getData('text');
                   if (pasted) {
                     handlePasteOrInputChange(pasted);
                   }
                 }}
-                placeholder="Paste anything — JSON, JWT, Base64, cron, timestamp…"
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    const file = e.dataTransfer.files[0];
+                    if (file.type.startsWith('image/')) {
+                      routeImageFile(file);
+                    }
+                  }
+                }}
+                placeholder="Paste anything — JSON, JWT, Base64, cron, timestamp, or drop an image..."
                 className={`w-full p-4 rounded-xl font-mono text-sm focus:outline-none transition resize-none shadow-xl border ${
                   theme === 'dark'
                     ? 'bg-neutral-900/90 border-neutral-800 text-neutral-100 placeholder-neutral-500 focus:border-neutral-600'
@@ -297,6 +374,32 @@ export function App() {
                 }`}
               />
 
+              {/* Inline Hex Color Swatch */}
+              {inlineColor && (
+                <div className={`p-3 rounded-lg flex items-center justify-between border ${
+                  theme === 'dark' ? 'bg-neutral-900 border-neutral-800' : 'bg-white border-neutral-200'
+                }`}>
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-8 h-8 rounded-md border border-black/20 shadow-inner"
+                      style={{ backgroundColor: inlineColor }}
+                    />
+                    <div>
+                      <span className="text-xs font-mono font-semibold block">{inlineColor}</span>
+                      <span className="text-[11px] opacity-60">Detected Hex Color (Color picker coming in v2)</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(inlineColor)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-neutral-800 text-neutral-200 text-xs font-mono"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>Copy</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Candidate Chips for Ambiguous Detection */}
               {candidates.length > 0 && (
                 <div className={`p-3 rounded-lg text-left flex flex-col gap-2 border ${
                   theme === 'dark' ? 'bg-neutral-900/80 border-neutral-800' : 'bg-neutral-100 border-neutral-200'

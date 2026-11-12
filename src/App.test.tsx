@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import App from './App';
 
-describe('Smart Paste Integration Flow', () => {
+describe('Smart Paste & Image Integration Flow v1.1', () => {
   beforeEach(() => {
     window.location.hash = '';
   });
@@ -44,6 +44,30 @@ describe('Smart Paste Integration Flow', () => {
 
     await waitFor(() => {
       expect(window.location.hash).toContain('/t/timestamp');
+    });
+  });
+
+  it('routes to Base64 image mode when pasting image Data URI', async () => {
+    render(<App />);
+    const textarea = screen.getByPlaceholderText(/Paste anything/i);
+    const pngDataUri = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+    fireEvent.change(textarea, { target: { value: pngDataUri } });
+
+    await waitFor(() => {
+      expect(window.location.hash).toContain('/t/base64');
+    });
+  });
+
+  it('shows inline color swatch when pasting hex color', async () => {
+    render(<App />);
+    const textarea = screen.getByPlaceholderText(/Paste anything/i);
+
+    fireEvent.change(textarea, { target: { value: '#ff5722' } });
+
+    await waitFor(() => {
+      expect(screen.getAllByText('#ff5722').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText(/Detected Hex Color/i)).toBeTruthy();
     });
   });
 });
